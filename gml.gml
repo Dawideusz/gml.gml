@@ -50,9 +50,11 @@ You have to call gml_init() to initialize it.
 ======= EXAMPLES ======= 
 ======================== 
 
+
 // Running code
 var result = gml_run("return 1 + 1")
 trace(result) // 2
+
 
 // Running code with caching
 var compiled = gml_parse(@"
@@ -65,11 +67,22 @@ return k
 var result = gml_vm(compiled)
 trace(result) // 729
 
+
 // Running code under a custom context, with blacklisting
 var scpt = new gmlVMScript()
 scpt.AddBlacklist(trace)
 var result = gml_run("trace(a_var)", { a_var: 1 }, scpt) // error (can't use trace)
 trace(gml_is_error(result)) // 1
+
+
+// Parenting 2 scripts and assigning a global to one of them
+var parent = new gmlVMScript()
+var child = new gmlVMScript()
+
+child.AssignParent(parent);
+parent.SetGlobalVar('test', 'hi');
+
+gml_run("trace(test)", {}, child) // hi
 
 
 ======================== 
@@ -546,10 +559,13 @@ function gmlTokenizer(consumer) constructor
 		return ds_queue_dequeue(self.available_tokens) ?? [token_type.eof, 0, { column: 0, line: 0 }]
 	}
 	
-	self.TryFill(2)
+	static Do = function ()
+	{
+		self.TryFill(2)
 	
-	self.next_token = self.PopAvailable()
-	self.next_next_token = self.PopAvailable()
+		self.next_token = self.PopAvailable()
+		self.next_next_token = self.PopAvailable()
+	}
 	
 	static Depleted = function ()
 	{
@@ -892,11 +908,8 @@ function gmlTokenizer(consumer) constructor
 	                    // this is a macro
 	                    // fixes for toString and such
 	                    var macro = self.macros[$ symb]
-	                    if is_string(macro)
-	                    {
-	                    	consumer.Offload(macro)
-	                    	break;
-	                    }
+                    	consumer.Offload(string(macro))
+                    	break;
 	                }
 						
 					switch symb
@@ -5108,7 +5121,9 @@ function __gml_call(meth, args, is_constructor = false)
     	// if they have a self bound to them, it's usually shifted to the 'other' since the 'self' becomes
     	// the current struct that's being constructed.
     	// We have to make an unbound copy and properly arrange things ourselves.
-    	var construct_self = __gml_method_get_self_real(meth)
+    	
+    	// if the method isn't bound, default to the caller's self
+    	var construct_self = __gml_method_get_self_real(meth) ?? self
     	var naked_meth = __gml_method_real(undefined, meth)
     	with construct_self
     	{
@@ -5122,10 +5137,10 @@ function __gml_call(meth, args, is_constructor = false)
 function gml_vm_builtin(varname)
 {
     static found = false;
+    found = true;
+    
     if varname == "global"
         return global;
-    
-    found = true;
     
     // overrides
     var override = struct_get(__gml.vm_overrides, varname)
@@ -5153,6 +5168,58 @@ function gml_vm_builtin(varname)
 function gmlVMScript() constructor
 {
     self.blacklisted = {}
+    self.global_self = {}
+    self.parent_script = undefined;
+    self.children_scripts = []
+    
+    static HasGlobalVar = function (varname)
+    {
+    	return variable_instance_exists(self.global_self, varname)
+    }
+    
+    static GetGlobalVar = function (varname)
+    {
+    	return variable_instance_get(self.global_self, varname)
+    }
+    
+    static SetGlobalVar = function (varname, value)
+    {
+    	variable_instance_set(self.global_self, varname, value)
+    	self.__PropagateToKids("SetGlobalVar", [varname, value])
+    }
+    
+    static RemoveGlobalVar = function (varname)
+    {
+    	variable_struct_remove(self.global_self, varname)
+    	self.__PropagateToKids("RemoveGlobalVar", [varname])
+    }
+    
+    static __PropagateToKids = function (funcname, args)
+    {
+    	var kids = self.children_scripts;
+    	for (var i = 0; i < array_length(kids); i++)
+    	{
+    		var son = kids[i];
+    		var statih = __gml_static_get_real(son);
+    		var fn = statih[$ funcname]
+    		with son
+    			method_call(fn, args)
+    	}
+    }
+    
+    static AssignParent = function (parent_scr)
+    {
+    	self.parent_script = parent_scr;
+    	array_push(parent_scr.children_scripts, self);
+    }
+    
+    static Orphan = function ()
+    {
+    	var par_kids = self.parent_script.children_scripts
+    	var ind = array_get_index(par_kids, self)
+    	array_delete(par_kids, ind, 1)
+    	self.parent_script = undefined;
+    }
 
     static AddBlacklist = function ()
     {
@@ -5262,6 +5329,7 @@ function gmlVMContext(script, instance, inst_other, gmfunc = "<gml.gml>") constr
         if struct_exists(self.readonly, v) return self.readonly
         if self.HasFunc(v) return self.functions;
         if variable_instance_exists(self.scope, v) return self.scope
+        if self.script.HasGlobalVar(v) return self.script.global_self;
         if variable_global_exists(v) return global;
         
         return undefined;
@@ -5287,6 +5355,11 @@ function gmlVMContext(script, instance, inst_other, gmfunc = "<gml.gml>") constr
         // can't assign readonlys (they tend to do that)
         if struct_exists(self.readonly, n) && location_scope == self.readonly
         	throw $"Can't assign to readonly variable: {n}";
+        
+        // can't assign to script globals either
+        var glb = self.script.global_self;
+        if variable_instance_exists(glb, n) && location_scope == glb
+        	throw $"Can't assign to script global: {n}";
         
     	variable_instance_set(location_scope, n, v)
     }
@@ -5998,6 +6071,8 @@ function gml_parse(code, macros = {})
 		}
 	}
 	
+	tokens.Do();
+	
     try 
     {
         __gml.gml_enums = {}
@@ -6039,9 +6114,10 @@ function gml_vm(AST, _script = undefined, _self = self, _other = other)
     	gml_vm_expr(funcnode, ctx) // define it
     }
     
+    // actually execute the thing
     try
     {
-    	var r = gml_vm_block(AST.top, ctx) ?? 0;
+    	var r = gml_vm_block(AST.top, ctx);
     	is_running = false;
     	
         return gml_vm_returncode(r);
