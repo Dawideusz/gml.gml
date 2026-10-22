@@ -5207,17 +5207,36 @@ function gmlVMScript() constructor
     	}
     }
     
+    static __RegisterChild = function (child_scr)
+    {
+    	array_push(self.children_scripts, child_scr);
+    	
+    	// resync all variables
+    	var names = struct_get_names(self.global_self);
+    	for (var i = 0; i < array_length(names); i++)
+    	{
+    		var name = names[i]
+    		if (!child_scr.HasGlobalVar(name))
+    			child_scr.SetGlobalVar(name, self.global_self[$ name])
+    	}
+    }
+    
+    static __OrphanChild = function (child_scr)
+    {
+    	var kids = self.children_scripts;
+    	var ind = array_get_index(kids, child_scr)
+    	array_delete(kids, ind, 1)
+    }
+    
     static AssignParent = function (parent_scr)
     {
     	self.parent_script = parent_scr;
-    	array_push(parent_scr.children_scripts, self);
+    	parent_scr.__RegisterChild(self);
     }
     
     static Orphan = function ()
     {
-    	var par_kids = self.parent_script.children_scripts
-    	var ind = array_get_index(par_kids, self)
-    	array_delete(par_kids, ind, 1)
+    	self.parent_script.__OrphanChild(self);
     	self.parent_script = undefined;
     }
 
