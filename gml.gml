@@ -5604,7 +5604,7 @@ function __gml_vm_set_dot(value, ctx)
     {
     	// dig them up
     	var found = __gml_staticchain_find(static_get(root), varname)
-    	if struct_exists(found, varname)
+    	if !is_undefined(found) && struct_exists(found, varname)
     	{
     		found[$ varname] = value;
     		set_already = true;
